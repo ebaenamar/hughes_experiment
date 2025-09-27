@@ -18,6 +18,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'tools'))
 from satellite_tracer import SatelliteTracer
 from delay_analyzer import SatelliteDelayAnalyzer
 from performance_monitor import SatellitePerformanceMonitor, AlertThreshold
+from alternative_tracer import AlternativeSatelliteTracer
 
 def analyze_hughes_connection(target_host: str):
     """
@@ -37,6 +38,50 @@ def analyze_hughes_connection(target_host: str):
     
     tracer = SatelliteTracer()
     route = tracer.enhanced_traceroute(target_host, max_hops=25, packets_per_hop=3)
+    
+    # If traditional traceroute fails, use alternative methods
+    if route.total_hops == 0:
+        print("\n⚠️  Traditional traceroute blocked - using alternative methods...")
+        print("-" * 50)
+        
+        alt_tracer = AlternativeSatelliteTracer()
+        alt_results = alt_tracer.comprehensive_trace(target_host, max_hops=25)
+        
+        # Create a mock route object for compatibility
+        from satellite_tracer import SatelliteRoute, HopInfo
+        
+        # Convert alternative results to standard format
+        mock_hops = []
+        satellite_hops = 0
+        
+        if alt_results:
+            # Analyze timing results to determine satellite characteristics
+            timing_results = [r for r in alt_results if r.method == 'timing' and r.success]
+            if timing_results:
+                avg_rtt = timing_results[0].rtt_ms
+                if avg_rtt > 200:
+                    satellite_hops = 1
+                    
+                    mock_hop = HopInfo(
+                        hop_number=1,
+                        ip_address=target_host,
+                        hostname=None,
+                        rtt_ms=[avg_rtt],
+                        avg_rtt=avg_rtt,
+                        packet_loss=0.0,
+                        hop_type='satellite'
+                    )
+                    mock_hops.append(mock_hop)
+        
+        route = SatelliteRoute(
+            destination=target_host,
+            total_hops=len(mock_hops),
+            hops=mock_hops,
+            total_rtt=sum(h.avg_rtt for h in mock_hops),
+            satellite_hops=satellite_hops,
+            terrestrial_hops=0,
+            gateway_hops=0
+        )
     
     # Step 2: Delay Analysis
     print("\nStep 2: Performing delay analysis...")

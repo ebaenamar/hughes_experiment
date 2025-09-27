@@ -238,29 +238,71 @@ class HughesNetworkDiscovery:
         return indicators
     
     def _calculate_hughes_confidence(self, node, indicators: List[str]) -> float:
-        """Calculate confidence that this is Hughes infrastructure"""
+        """Calculate confidence that this is Hughes infrastructure with systematic scoring"""
         
         confidence = 0.0
         
-        # Strong indicators
+        # STRONG EVIDENCE (High confidence indicators)
         if any('hughes' in ind for ind in indicators):
-            confidence += 0.8
+            confidence += 0.8  # Hostname contains "hughes"
         
         if 'hughes_asn' in indicators:
-            confidence += 0.7
+            confidence += 0.9  # Confirmed Hughes ASN
         
-        if 'satellite_rtt' in indicators:
-            confidence += 0.5
+        if 'hughes_organization' in indicators:
+            confidence += 0.8  # Confirmed Hughes organization
         
-        # Moderate indicators
+        # MODERATE EVIDENCE (Medium confidence indicators)
         if any('jupiter' in ind or 'spaceway' in ind for ind in indicators):
+            confidence += 0.6  # Hughes satellite names
+        
+        # RTT-based evidence (requires careful analysis)
+        if 'satellite_rtt' in indicators:
+            rtt = node.rtt_ms
+            if rtt > 240:  # Clear GEO satellite
+                confidence += 0.7
+            elif rtt > 200:  # Possible satellite but uncertain
+                confidence += 0.3  # Lower confidence for borderline RTT
+            
+        # IP range evidence (if in known Hughes ranges)
+        ip_addr = node.ip_address
+        if self._is_in_hughes_ip_range(ip_addr):
             confidence += 0.6
         
-        # Weak indicators
-        if any('service_' in ind for ind in indicators):
-            confidence += 0.2
+        # WEAK EVIDENCE (Low confidence indicators)
+        service_indicators = [ind for ind in indicators if 'service_' in ind]
+        if service_indicators:
+            confidence += min(0.3, len(service_indicators) * 0.1)  # Cap at 0.3
         
-        return min(1.0, confidence)
+        # GEOGRAPHIC EVIDENCE
+        if hasattr(node, 'location') and node.location:
+            # International locations more likely for satellite infrastructure
+            if self._is_international_location(node.location):
+                confidence += 0.2
+        
+        # PENALTY for conflicting evidence
+        if node.rtt_ms < 20 and 'satellite_rtt' in indicators:
+            confidence -= 0.4  # RTT too low for satellite
+        
+        return min(1.0, max(0.0, confidence))
+    
+    def _is_in_hughes_ip_range(self, ip_addr: str) -> bool:
+        """Check if IP is in known Hughes ranges"""
+        try:
+            import ipaddress
+            ip = ipaddress.ip_address(ip_addr)
+            
+            hughes_ranges = [
+                ipaddress.ip_network('67.15.0.0/16'),
+                ipaddress.ip_network('69.46.0.0/16'),
+                ipaddress.ip_network('74.192.0.0/10'),
+                ipaddress.ip_network('162.248.0.0/16'),
+                ipaddress.ip_network('199.167.0.0/16')
+            ]
+            
+            return any(ip in network for network in hughes_ranges)
+        except:
+            return False
     
     def _is_hughes_infrastructure(self, hop) -> bool:
         """Check if a hop represents Hughes infrastructure"""
@@ -297,6 +339,7 @@ class HughesNetworkDiscovery:
             'ground_stations': [],
             'pops': [],
             'customer_equipment': [],
+            'terrestrial_infrastructure': [],
             'unknown': []
         }
         
@@ -307,34 +350,89 @@ class HughesNetworkDiscovery:
         return classification
     
     def _determine_infrastructure_type(self, node_info: Dict) -> str:
-        """Determine the type of Hughes infrastructure"""
+        """Determine the type of Hughes infrastructure with systematic analysis"""
         
         hostname = node_info.get('hostname', '').lower() if node_info.get('hostname') else ''
         rtt = node_info.get('rtt_ms', 0)
         indicators = node_info.get('hughes_indicators', [])
+        confidence = node_info.get('confidence', 0.0)
         
-        # Satellite classification
-        if rtt > 200 or 'satellite_rtt' in indicators:
-            if any(keyword in hostname for keyword in ['sat', 'satellite', 'jupiter', 'spaceway']):
-                return 'satellites'
+        # SYSTEMATIC SATELLITE CLASSIFICATION - Requires multiple confirmations
+        satellite_score = 0
         
-        # Gateway classification
-        if any(keyword in hostname for keyword in ['gw', 'gateway', 'teleport']):
+        # RTT analysis (most reliable indicator)
+        if rtt > 240:  # Minimum GEO satellite RTT
+            satellite_score += 3
+        elif rtt > 200:  # Possible satellite but could be long terrestrial
+            satellite_score += 1
+        
+        # Hostname analysis (strong indicator)
+        if hostname and any(keyword in hostname for keyword in ['sat', 'satellite', 'jupiter', 'spaceway']):
+            satellite_score += 3
+        
+        # Hughes-specific satellite indicators
+        if any(indicator in indicators for indicator in ['hughes_asn', 'hughes_organization']):
+            satellite_score += 2
+        
+        # Geographic analysis (satellites often have international locations)
+        location = node_info.get('location')
+        if location and self._is_international_location(location):
+            satellite_score += 1
+        
+        # Confidence threshold - require high confidence for satellite classification
+        if satellite_score >= 4 and confidence >= 0.7:
+            return 'satellites'
+        elif satellite_score >= 6:  # Very strong evidence even with lower confidence
+            return 'satellites'
+        
+        # GATEWAY CLASSIFICATION - More systematic
+        gateway_score = 0
+        
+        if hostname:
+            if any(keyword in hostname for keyword in ['gw', 'gateway', 'teleport']):
+                gateway_score += 3
+            if any(keyword in hostname for keyword in ['noc', 'hub']):
+                gateway_score += 2
+        
+        # RTT range typical for gateways (terrestrial but may route to satellites)
+        if 20 < rtt < 100:
+            gateway_score += 1
+        
+        # Services typical of gateways
+        services = node_info.get('services', [])
+        if any('DNS' in service or 'HTTP' in service for service in services):
+            gateway_score += 1
+        
+        if gateway_score >= 3 and confidence >= 0.5:
             return 'gateways'
         
-        # Ground station classification
-        if any(keyword in hostname for keyword in ['ground', 'earth', 'station']):
+        # GROUND STATION CLASSIFICATION
+        if hostname and any(keyword in hostname for keyword in ['ground', 'earth', 'station', 'teleport']):
             return 'ground_stations'
         
-        # PoP classification
-        if any(keyword in hostname for keyword in ['pop', 'point-of-presence']):
+        # POP CLASSIFICATION
+        if hostname and any(keyword in hostname for keyword in ['pop', 'point-of-presence']):
             return 'pops'
         
-        # Customer equipment
-        if any(keyword in hostname for keyword in ['cpe', 'modem', 'customer']):
+        # CUSTOMER EQUIPMENT
+        if hostname and any(keyword in hostname for keyword in ['cpe', 'modem', 'customer', 'static']):
             return 'customer_equipment'
         
+        # TERRESTRIAL INFRASTRUCTURE - Low RTT, Hughes indicators
+        if rtt < 100 and confidence >= 0.3:
+            return 'terrestrial_infrastructure'
+        
         return 'unknown'
+    
+    def _is_international_location(self, location: Tuple[float, float]) -> bool:
+        """Check if location is outside North America (Hughes primary market)"""
+        lat, lon = location
+        
+        # North America approximate bounds
+        if 25 <= lat <= 70 and -170 <= lon <= -50:
+            return False  # North America
+        
+        return True  # International
     
     def _generate_infrastructure_report(self, infrastructure: Dict):
         """Generate comprehensive infrastructure report"""
